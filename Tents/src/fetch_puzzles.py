@@ -109,8 +109,9 @@ def parse_puzzle_page(html_content: str):
     if len(clues) < rows + cols:
         return None
 
-    row_constraints = clues[:rows]
-    col_constraints = clues[rows:rows + cols]
+    # Trong chuỗi của puzzle-tents.com, danh sách clue gồm các cột trước rồi đến các hàng
+    col_constraints = clues[:cols]
+    row_constraints = clues[cols:cols + rows]
 
     # 5. Khôi phục ma trận Cây
     grid = decode_grid(tree_code, rows, cols)

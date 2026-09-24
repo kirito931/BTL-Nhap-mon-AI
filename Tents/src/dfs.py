@@ -13,39 +13,56 @@ import sys
 import time
 import tracemalloc
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Đảm bảo import được module board khi chạy trực tiếp file dfs.py
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from board import TentsBoard, load_input_file
 
 
 class DFSSolver:
-    def __init__(self, board: TentsBoard):
+    def __init__(self, board: TentsBoard, max_nodes: int = 150000, timeout_sec: float = 6.0):
         self.board = board
+        self.max_nodes = max_nodes
+        self.timeout_sec = timeout_sec
         self.nodes_explored = 0  # Số lượng trạng thái/nhánh đã duyệt
         self.backtracks = 0      # Số lần phải quay lui khi vào ngõ cụt
         self.solved = False
+        self.timed_out = False
+        self.start_time = 0.0
+
+        # Sắp xếp các cây theo số vị trí kề hợp lệ ban đầu tăng dần (MRV Heuristic)
+        # Giúp ưu tiên giải các cây bị ràng buộc nhiều nhất trước, giảm bùng nổ tổ hợp
+        self.ordered_trees = sorted(
+            self.board.trees,
+            key=lambda t: sum(1 for dr, dc in self.board.ORTHO_DIRS if self.board.can_place_tent(t[0] + dr, t[1] + dc))
+        )
 
     def solve(self):
         """
         Kích hoạt giải bài toán, tự động đo thời gian và mức tiêu hao RAM.
         Trả về dictionary chứa kết quả và các thông số thực nghiệm.
         """
-        # Bắt đầu theo dõi bộ nhớ RAM và thời gian
         tracemalloc.start()
-        start_time = time.perf_counter()
+        self.start_time = time.perf_counter()
 
-        # Gọi hàm đệ quy từ cây đầu tiên (index 0)
+        # Gọi hàm đệ quy từ cây đầu tiên trong danh sách đã sắp xếp
         self.solved = self._backtrack(tree_index=0)
 
         end_time = time.perf_counter()
         current_mem, peak_mem = tracemalloc.get_traced_memory()
         tracemalloc.stop()
 
-        elapsed_time = end_time - start_time
-        peak_mem_kb = peak_mem / 1024.0  # Chuyển đổi sang Kilobytes
+        elapsed_time = end_time - self.start_time
+        peak_mem_kb = peak_mem / 1024.0
 
         return {
             "solved": self.solved,
+            "timed_out": self.timed_out,
             "execution_time_sec": elapsed_time,
             "peak_memory_kb": peak_mem_kb,
             "nodes_explored": self.nodes_explored,
@@ -54,13 +71,18 @@ class DFSSolver:
         }
 
     def _backtrack(self, tree_index: int) -> bool:
-        """Duyệt đệ quy theo chiều sâu qua từng cây."""
+        """Duyệt đệ quy theo chiều sâu qua từng cây với kiểm tra an toàn Timeout."""
+        # Kiểm tra ngưỡng an toàn để không bao giờ làm đơ ứng dụng hoặc tràn bộ nhớ
+        if self.nodes_explored >= self.max_nodes or (time.perf_counter() - self.start_time) > self.timeout_sec:
+            self.timed_out = True
+            return False
+
         # TRƯỜNG HỢP CƠ SỞ: Đã gán lều cho toàn bộ K cây
-        if tree_index == len(self.board.trees):
+        if tree_index == len(self.ordered_trees):
             return self.board.is_solved()
 
         self.nodes_explored += 1
-        curr_tree = self.board.trees[tree_index]
+        curr_tree = self.ordered_trees[tree_index]
         tr, tc = curr_tree
 
         # Thử đặt lều tại 4 hướng trực giao (Lên, Xuống, Trái, Phải)

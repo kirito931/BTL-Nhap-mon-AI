@@ -16,16 +16,23 @@ import random
 import time
 import tracemalloc
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from board import TentsBoard, load_input_file
 
 
 class HillClimbingSolver:
-    def __init__(self, board: TentsBoard, max_restarts: int = 200, max_steps_per_restart: int = 500, max_sideways: int = 30):
+    def __init__(self, board: TentsBoard, max_restarts: int = 150, max_steps_per_restart: int = 300, max_sideways: int = 25, timeout_sec: float = 6.0):
         self.board = board
         self.max_restarts = max_restarts
         self.max_steps_per_restart = max_steps_per_restart
         self.max_sideways = max_sideways
+        self.timeout_sec = timeout_sec
 
         self.trees = board.trees
         self.num_trees = len(self.trees)
@@ -94,6 +101,8 @@ class HillClimbingSolver:
         current_score = float("inf")  # Khởi tạo trước vòng lặp để tránh cảnh báo unbound variable
 
         for restart_count in range(self.max_restarts):
+            if (time.perf_counter() - start_time) > self.timeout_sec:
+                break
             self.total_restarts = restart_count + 1
             current_state = self._generate_random_state()
             current_score = self._calculate_heuristic(current_state)

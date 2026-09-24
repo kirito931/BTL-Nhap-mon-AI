@@ -121,6 +121,8 @@ class TentsBoard:
 
         return True
 
+    MAX_HISTORY_STEPS = 25000  # Giới hạn tối đa bước log để tuyệt đối tránh tràn RAM
+
     def place_tent(self, r: int, c: int, tree_pos: tuple):
         """Đặt lều vào ô (r, c) phục vụ cho cây tree_pos và ghi log bước đi."""
         self.grid[r][c] = self.TENT
@@ -129,11 +131,12 @@ class TentsBoard:
         self.row_tent_counts[r] += 1
         self.col_tent_counts[c] += 1
 
-        self.history_steps.append({
-            "action": "PLACE",
-            "pos": (r, c),
-            "tree": tree_pos
-        })
+        if len(self.history_steps) < self.MAX_HISTORY_STEPS:
+            self.history_steps.append({
+                "action": "PLACE",
+                "pos": (r, c),
+                "tree": tree_pos
+            })
 
     def remove_tent(self, r: int, c: int):
         """Gỡ lều khỏi ô (r, c) (khi quay lui DFS hoặc đổi vị trí láng giềng) và ghi log."""
@@ -146,11 +149,12 @@ class TentsBoard:
         self.row_tent_counts[r] -= 1
         self.col_tent_counts[c] -= 1
 
-        self.history_steps.append({
-            "action": "REMOVE",
-            "pos": (r, c),
-            "tree": tree_pos
-        })
+        if len(self.history_steps) < self.MAX_HISTORY_STEPS:
+            self.history_steps.append({
+                "action": "REMOVE",
+                "pos": (r, c),
+                "tree": tree_pos
+            })
 
     def is_solved(self) -> bool:
         """Kiểm tra bàn cờ đã đạt trạng thái đích (Goal State) hay chưa."""
