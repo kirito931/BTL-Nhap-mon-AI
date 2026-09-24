@@ -25,14 +25,17 @@ from board import TentsBoard, load_input_file
 
 
 class DFSSolver:
-    def __init__(self, board: TentsBoard, max_nodes: int = 150000, timeout_sec: float = 6.0):
+    def __init__(self, board: TentsBoard, max_nodes: int = None, timeout_sec: float = None, cancel_event=None, step_callback=None):
         self.board = board
         self.max_nodes = max_nodes
         self.timeout_sec = timeout_sec
+        self.cancel_event = cancel_event
+        self.step_callback = step_callback
         self.nodes_explored = 0  # Số lượng trạng thái/nhánh đã duyệt
         self.backtracks = 0      # Số lần phải quay lui khi vào ngõ cụt
         self.solved = False
         self.timed_out = False
+        self.user_stopped = False
         self.start_time = 0.0
 
         # Sắp xếp các cây theo số vị trí kề hợp lệ ban đầu tăng dần (MRV Heuristic)
@@ -50,8 +53,8 @@ class DFSSolver:
         tracemalloc.start()
         self.start_time = time.perf_counter()
 
-        # Gọi hàm đệ quy từ cây đầu tiên trong danh sách đã sắp xếp
-        self.solved = self._backtrack(tree_index=0)
+        # Gọi hàm đệ quy tìm kiếm theo chiều sâu kết hợp Dynamic MRV & Forward Checking
+        self.solved = self._backtrack(set(self.board.trees))
 
         end_time = time.perf_counter()
         current_mem, peak_mem = tracemalloc.get_traced_memory()
@@ -63,6 +66,7 @@ class DFSSolver:
         return {
             "solved": self.solved,
             "timed_out": self.timed_out,
+            "user_stopped": self.user_stopped,
             "execution_time_sec": elapsed_time,
             "peak_memory_kb": peak_mem_kb,
             "nodes_explored": self.nodes_explored,
@@ -70,39 +74,75 @@ class DFSSolver:
             "total_steps": len(self.board.history_steps)
         }
 
-    def _backtrack(self, tree_index: int) -> bool:
-        """Duyệt đệ quy theo chiều sâu qua từng cây với kiểm tra an toàn Timeout."""
-        # Kiểm tra ngưỡng an toàn để không bao giờ làm đơ ứng dụng hoặc tràn bộ nhớ
-        if self.nodes_explored >= self.max_nodes or (time.perf_counter() - self.start_time) > self.timeout_sec:
+    def _backtrack(self, unassigned_trees: set) -> bool:
+        """
+        Duyệt đệ quy theo chiều sâu qua từng cây với Dynamic MRV và Forward Checking.
+        Ưu tiên cây có ít lựa chọn hợp lệ nhất (Minimum Remaining Values), cắt tỉa
+        ngay lập tức khi phát hiện ngõ cụt mà không tốn công duyệt hàng ngàn nhánh vô ích.
+        """
+        if self.user_stopped or (self.cancel_event is not None and self.cancel_event.is_set()):
+            self.user_stopped = True
+            return False
+
+        if self.max_nodes is not None and self.nodes_explored >= self.max_nodes:
             self.timed_out = True
             return False
 
-        # TRƯỜNG HỢP CƠ SỞ: Đã gán lều cho toàn bộ K cây
-        if tree_index == len(self.ordered_trees):
+        if self.timeout_sec is not None and (time.perf_counter() - self.start_time) > self.timeout_sec:
+            self.timed_out = True
+            return False
+
+        # TRƯỜNG HỢP CƠ SỞ: Đã gán lều cho toàn bộ cây
+        if not unassigned_trees:
             return self.board.is_solved()
 
         self.nodes_explored += 1
-        curr_tree = self.ordered_trees[tree_index]
-        tr, tc = curr_tree
 
-        # Thử đặt lều tại 4 hướng trực giao (Lên, Xuống, Trái, Phải)
-        for dr, dc in self.board.ORTHO_DIRS:
-            nr, nc = tr + dr, tc + dc
+        # CHIẾN LƯỢC DYNAMIC MRV & FORWARD CHECKING
+        best_tree = None
+        best_slots = None
+        min_candidates = 999
 
-            # CẮT TỈA (Pruning): Kiểm tra ô (nr, nc) có hợp lệ không
+        for tree in unassigned_trees:
+            tr, tc = tree
+            valid_slots = []
+            for dr, dc in self.board.ORTHO_DIRS:
+                nr, nc = tr + dr, tc + dc
+                if self.board.can_place_tent(nr, nc):
+                    valid_slots.append((nr, nc))
+
+            # Forward Checking: Nếu phát hiện bất kỳ cây nào không còn vị trí hợp lệ -> Ngõ cụt, cắt tỉa ngay
+            if not valid_slots:
+                return False
+
+            if len(valid_slots) < min_candidates:
+                min_candidates = len(valid_slots)
+                best_tree = tree
+                best_slots = valid_slots
+                if min_candidates == 1:
+                    break
+
+        next_unassigned = unassigned_trees - {best_tree}
+
+        # Thử đặt lều tại các vị trí hợp lệ của cây được chọn (MRV)
+        for (nr, nc) in best_slots:
             if self.board.can_place_tent(nr, nc):
-                # 1. Đặt lều và lưu lại lịch sử
-                self.board.place_tent(nr, nc, curr_tree)
+                self.board.place_tent(nr, nc, best_tree)
+                if self.step_callback:
+                    self.step_callback("PLACE", (nr, nc), best_tree, self.nodes_explored, self.backtracks)
 
-                # 2. Đệ quy giải tiếp cho cây kế tiếp (tree_index + 1)
-                if self._backtrack(tree_index + 1):
+                if self._backtrack(next_unassigned):
                     return True
 
-                # 3. Quay lui: gỡ lều ra nếu nhánh phía dưới không tìm thấy nghiệm
+                if self.user_stopped:
+                    self.board.remove_tent(nr, nc)
+                    return False
+
                 self.board.remove_tent(nr, nc)
                 self.backtracks += 1
+                if self.step_callback:
+                    self.step_callback("REMOVE", (nr, nc), best_tree, self.nodes_explored, self.backtracks)
 
-        # Nếu cả 4 hướng đều không thể đặt hoặc dẫn đến ngõ cụt
         return False
 
 

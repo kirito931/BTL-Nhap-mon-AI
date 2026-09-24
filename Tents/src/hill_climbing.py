@@ -27,12 +27,14 @@ from board import TentsBoard, load_input_file
 
 
 class HillClimbingSolver:
-    def __init__(self, board: TentsBoard, max_restarts: int = 150, max_steps_per_restart: int = 300, max_sideways: int = 25, timeout_sec: float = 6.0):
+    def __init__(self, board: TentsBoard, max_restarts: int = None, max_steps_per_restart: int = 250, max_sideways: int = 25, timeout_sec: float = None, cancel_event=None, step_callback=None):
         self.board = board
         self.max_restarts = max_restarts
         self.max_steps_per_restart = max_steps_per_restart
         self.max_sideways = max_sideways
         self.timeout_sec = timeout_sec
+        self.cancel_event = cancel_event
+        self.step_callback = step_callback
 
         self.trees = board.trees
         self.num_trees = len(self.trees)
@@ -51,6 +53,8 @@ class HillClimbingSolver:
         self.states_evaluated = 0
         self.total_restarts = 0
         self.solved = False
+        self.timed_out = False
+        self.user_stopped = False
 
     def _calculate_heuristic(self, state: list) -> int:
         """
@@ -65,7 +69,7 @@ class HillClimbingSolver:
             r1, c1 = state[i]
             for j in range(i + 1, self.num_trees):
                 r2, c2 = state[j]
-                if max(abs(r1 - r2), abs(c1 - c2)) <= 1:
+                if abs(r1 - r2) <= 1 and abs(c1 - c2) <= 1:
                     conflicts += 1
 
         # 2. Đếm số lều trên từng hàng và cột
@@ -100,12 +104,26 @@ class HillClimbingSolver:
         best_score = float("inf")
         current_score = float("inf")  # Khởi tạo trước vòng lặp để tránh cảnh báo unbound variable
 
-        for restart_count in range(self.max_restarts):
-            if (time.perf_counter() - start_time) > self.timeout_sec:
+        restart_count = 0
+        while True:
+            if self.cancel_event is not None and self.cancel_event.is_set():
+                self.user_stopped = True
                 break
-            self.total_restarts = restart_count + 1
+
+            if self.timeout_sec is not None and (time.perf_counter() - start_time) > self.timeout_sec:
+                self.timed_out = True
+                break
+
+            if self.max_restarts is not None and restart_count >= self.max_restarts:
+                break
+
+            restart_count += 1
+            self.total_restarts = restart_count
             current_state = self._generate_random_state()
             current_score = self._calculate_heuristic(current_state)
+
+            if self.step_callback:
+                self.step_callback("RESTART", current_state, current_score, self.total_restarts, self.states_evaluated, (-1, -1))
 
             # Cập nhật trạng thái tốt nhất tổng thể
             if current_score < best_score:
@@ -115,15 +133,26 @@ class HillClimbingSolver:
             sideways_count = 0
 
             for _ in range(self.max_steps_per_restart):
+                if self.cancel_event is not None and self.cancel_event.is_set():
+                    self.user_stopped = True
+                    break
+
+                if self.timeout_sec is not None and (time.perf_counter() - start_time) > self.timeout_sec:
+                    self.timed_out = True
+                    break
+
                 if current_score == 0:
                     best_state = current_state
                     best_score = 0
                     self.solved = True
+                    if self.step_callback:
+                        self.step_callback("SOLVED", best_state, 0, self.total_restarts, self.states_evaluated, (-1, -1))
                     break
 
                 # Tìm láng giềng tốt nhất (Steepest-Descent)
                 best_neighbor = None
                 best_neighbor_score = current_score
+                best_move_pos = (-1, -1)
 
                 tree_indices = list(range(self.num_trees))
                 random.shuffle(tree_indices)
@@ -141,9 +170,11 @@ class HillClimbingSolver:
                         if neighbor_score < best_neighbor_score:
                             best_neighbor_score = neighbor_score
                             best_neighbor = neighbor_state
+                            best_move_pos = slot
                         elif neighbor_score == best_neighbor_score and best_neighbor is None and sideways_count < self.max_sideways:
                             best_neighbor_score = neighbor_score
                             best_neighbor = neighbor_state
+                            best_move_pos = slot
 
                 # Kiểm tra tiến triển leo đồi
                 if best_neighbor is not None and best_neighbor_score < current_score:
@@ -153,14 +184,18 @@ class HillClimbingSolver:
                         best_score = current_score
                         best_state = current_state
                     sideways_count = 0
+                    if self.step_callback:
+                        self.step_callback("MOVE", current_state, current_score, self.total_restarts, self.states_evaluated, best_move_pos)
                 elif best_neighbor is not None and best_neighbor_score == current_score and sideways_count < self.max_sideways:
                     current_state = best_neighbor
                     sideways_count += 1
+                    if self.step_callback:
+                        self.step_callback("SIDEWAYS", current_state, current_score, self.total_restarts, self.states_evaluated, best_move_pos)
                 else:
                     # Bị kẹt ở Local Optima hoặc bình nguyên -> Thoát để Restart
                     break
 
-            if self.solved:
+            if self.solved or self.timed_out or self.user_stopped:
                 break
 
         end_time = time.perf_counter()
@@ -173,11 +208,13 @@ class HillClimbingSolver:
 
         return {
             "solved": self.solved,
+            "timed_out": self.timed_out,
+            "user_stopped": self.user_stopped,
             "execution_time_sec": end_time - start_time,
             "peak_memory_kb": peak_mem / 1024.0,
             "states_evaluated": self.states_evaluated,
             "restarts": self.total_restarts,
-            "final_heuristic": best_score  # Luôn trả về điểm tối ưu nhất tìm được
+            "final_heuristic": best_score if best_score != float("inf") else "N/A"  # Luôn trả về điểm tối ưu nhất tìm được
         }
 
     def _apply_solution_to_board(self, state: list):
