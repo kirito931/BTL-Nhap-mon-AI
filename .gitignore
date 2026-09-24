@@ -1,3 +1,6 @@
 Tents/inputs
 Tents/src/__pycache__
 Yin_Yang/inputs
+Yin_Yang/src/__pycache__
+**/__pycache__
+*.pyc
