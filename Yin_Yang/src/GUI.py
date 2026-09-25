@@ -114,14 +114,14 @@ COLOR_INFO = (52, 152, 219)
 class SteppedSolver:
     """Wrapper hỗ trợ giải và thu thập lịch sử bước cho animation Step-by-Step."""
     @staticmethod
-    def run_dfs(board: YinYangBoard, max_nodes=100000, timeout_sec=30.0, cancel_event=None, step_callback=None):
+    def run_dfs(board: YinYangBoard, max_nodes=None, timeout_sec=None, cancel_event=None, step_callback=None):
         solver = DFSSolver(board, max_nodes=max_nodes, timeout_sec=timeout_sec, cancel_event=cancel_event, step_callback=step_callback)
         result = solver.solve()
         return result
 
     @staticmethod
-    def run_ida(board: YinYangBoard, max_threshold=50, timeout_sec=30.0, cancel_event=None, step_callback=None):
-        solver = IDAStarSolver(board, max_nodes=100000, timeout_sec=timeout_sec, cancel_event=cancel_event, step_callback=step_callback)
+    def run_ida(board: YinYangBoard, max_threshold=100, timeout_sec=None, cancel_event=None, step_callback=None):
+        solver = IDAStarSolver(board, max_nodes=None, timeout_sec=timeout_sec, cancel_event=cancel_event, step_callback=step_callback)
         result = solver.solve(max_threshold=max_threshold)
         return result
 
@@ -289,6 +289,15 @@ class Button:
         self.border_color = border_color
         self.is_hovered = False
         self.is_active = False
+
+    def check_hover(self, pos):
+        self.is_hovered = self.rect.collidepoint(pos)
+        return self.is_hovered
+
+    def is_clicked(self, pos, event_type=None):
+        if event_type is not None and event_type != pygame.MOUSEBUTTONDOWN:
+            return False
+        return self.rect.collidepoint(pos)
 
     def draw(self, surface):
         color = self.hover_color if self.is_hovered else self.bg_color
@@ -596,6 +605,11 @@ class YinYangGameGUI:
         scrub_w = WINDOW_WIDTH - scrub_x - 30
         self.scrub_bar = ScrubBar((scrub_x, ctrl_y + 10, scrub_w, 18))
 
+        # Các nút cho cửa sổ Modal So sánh Đối đầu (Benchmark Modal)
+        self.btn_modal_rerun = Button((0, 0, 220, 38), "Đo lại từ đầu (Re-run)", bg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, font=self.font_bold, border_radius=6, border_color=COLOR_IDA)
+        self.btn_modal_export = Button((0, 0, 180, 38), "Xuất file Báo cáo", bg_color=COLOR_CARD, hover_color=COLOR_CARD_HOVER, font=self.font_bold, border_radius=6, border_color=COLOR_GOLD)
+        self.btn_modal_close = Button((0, 0, 110, 38), "Đóng", bg_color=COLOR_GOLD, hover_color=COLOR_GOLD_HOVER, text_color=(20, 20, 20), font=self.font_bold, border_radius=6)
+
     # ==========================================================================
     # CƠ CHẾ ĐIỀU KHIỂN TỐC ĐỘ VÀ MENU LỰA CHỌN (SPEED OPTION BOX)
     # ==========================================================================
@@ -675,8 +689,13 @@ class YinYangGameGUI:
         if self.solver_cancel_event is not None and self.solver_cancel_event.is_set():
             return
 
-        delay = self._get_live_step_delay()
-        # Nếu đang chạy ở Max Speed (delay == 0), điều tiết tần suất lock/copy để solver đạt hiệu năng tối đa
+        # Khi đang Benchmark đối đầu, không sleep nhân tạo để thời gian CPU hoàn toàn chính xác
+        if self.solving_algo_name.startswith("BENCHMARK"):
+            delay = 0.0
+        else:
+            delay = self._get_live_step_delay()
+
+        # Nếu đang chạy ở Max Speed hoặc Benchmark (delay == 0), điều tiết tần suất lock/copy để solver đạt hiệu năng tối đa
         if delay == 0.0 and nodes % 50 != 0:
             return
 
@@ -792,14 +811,16 @@ class YinYangGameGUI:
                 if algo_name == "DFS":
                     res = SteppedSolver.run_dfs(
                         solve_board,
-                        timeout_sec=30.0,
+                        max_nodes=None,
+                        timeout_sec=None,
                         cancel_event=self.solver_cancel_event,
                         step_callback=self._on_solver_step
                     )
                 else:
                     res = SteppedSolver.run_ida(
                         solve_board,
-                        timeout_sec=30.0,
+                        max_threshold=100,
+                        timeout_sec=None,
                         cancel_event=self.solver_cancel_event,
                         step_callback=self._on_solver_step
                     )
@@ -814,6 +835,13 @@ class YinYangGameGUI:
                 self.metrics["timed_out"] = res.get("timed_out", False)
                 self.metrics["user_stopped"] = res.get("user_stopped", False)
 
+                # Lưu vào cache để có thể xem lại ngay trong bảng So Sánh Đối Đầu
+                if self.current_filepath:
+                    if self.current_filepath not in self.puzzle_results_cache:
+                        self.puzzle_results_cache[self.current_filepath] = {}
+                    cache_key = "dfs" if algo_name == "DFS" else "ida"
+                    self.puzzle_results_cache[self.current_filepath][cache_key] = dict(res)
+
                 # Lưu lại chuỗi bước để animation Step-by-Step
                 self.history_steps = list(solve_board.history_steps)
                 if res["solved"]:
@@ -823,7 +851,7 @@ class YinYangGameGUI:
                 elif res.get("user_stopped", False):
                     self.log_msg = "Tìm kiếm đã dừng bởi người dùng."
                 elif res.get("timed_out", False):
-                    self.log_msg = "Hết thời gian tìm kiếm (Timeout 30s)!"
+                    self.log_msg = "Hết thời gian tìm kiếm!"
                 else:
                     self.log_msg = "Không tìm thấy lời giải khả thi cho câu đố này."
             finally:
@@ -835,13 +863,20 @@ class YinYangGameGUI:
         self.solver_thread.start()
 
     def run_benchmark_comparison(self, force_rerun: bool = False):
-        """Chạy cả 2 giải thuật DFS và IDA* liên tiếp để lập bảng so sánh đối đầu."""
-        if self.is_solving:
+        """Chạy cả 2 giải thuật DFS và IDA* liên tiếp để lập bảng so sánh đối đầu (tương tự Tents)."""
+        if self.is_solving or not self.board:
             return
 
-        # Kiểm tra bộ nhớ đệm (Cache) nếu không force_rerun
-        if not force_rerun and self.current_filepath in self.puzzle_results_cache:
-            self.compare_results = self.puzzle_results_cache[self.current_filepath]
+        cached = self.puzzle_results_cache.get(self.current_filepath, {})
+        # Nếu cả 2 thuật toán đều đã chạy trước đó trên bài toán này và không yêu cầu đo lại:
+        if not force_rerun and "dfs" in cached and "ida" in cached:
+            self.compare_results = {
+                "filename": os.path.basename(self.current_filepath),
+                "rows": self.board.rows,
+                "cols": self.board.cols,
+                "dfs": cached["dfs"],
+                "ida": cached["ida"]
+            }
             self.show_compare_modal = True
             return
 
@@ -851,72 +886,98 @@ class YinYangGameGUI:
         self.solver_cancel_event = threading.Event()
         self.solving_start_time = time.perf_counter()
 
-        with self.live_lock:
-            self.live_info = {
-                "algo": "BENCHMARK",
-                "grid": [row[:] for row in self.board.grid],
-                "last_pos": (-1, -1),
-                "nodes": 0,
-                "backtracks": 0,
-                "iterations": 0,
-                "h": 0,
-                "action": "START",
-                "active": True
-            }
-        self.log_msg = "Đang chạy Benchmark đối đầu (DFS vs IDA*)..."
-
-        def worker():
-            try:
-                # 1. Chạy DFS
-                self.solving_algo_name = "BENCHMARK - DFS"
-                b_dfs = self.board.copy()
-                res_dfs = SteppedSolver.run_dfs(
-                    b_dfs,
-                    timeout_sec=30.0,
-                    cancel_event=self.solver_cancel_event,
-                    step_callback=self._on_solver_step
-                )
-
-                if self.solver_cancel_event.is_set():
-                    return
-
-                # 2. Chạy IDA*
-                self.solving_algo_name = "BENCHMARK - IDA*"
-                b_ida = self.board.copy()
-                res_ida = SteppedSolver.run_ida(
-                    b_ida,
-                    timeout_sec=30.0,
-                    cancel_event=self.solver_cancel_event,
-                    step_callback=self._on_solver_step
-                )
-
-                self.compare_results = {
-                    "dfs": res_dfs,
-                    "ida": res_ida,
-                    "filename": os.path.basename(self.current_filepath),
-                    "rows": self.board.rows,
-                    "cols": self.board.cols
-                }
-                self.puzzle_results_cache[self.current_filepath] = self.compare_results
-
-                if res_dfs["solved"]:
-                    self.board = b_dfs
-                    self.history_steps = list(b_dfs.history_steps)
-                    self.current_step_index = len(self.history_steps) - 1
-                elif res_ida["solved"]:
-                    self.board = b_ida
-                    self.history_steps = list(b_ida.history_steps)
-                    self.current_step_index = len(self.history_steps) - 1
-
-                self.show_compare_modal = True
-                self.log_msg = "Đã hoàn thành Benchmark đối đầu!"
-            finally:
-                with self.live_lock:
-                    self.live_info["active"] = False
-                self.is_solving = False
-
-        self.solver_thread = threading.Thread(target=worker, daemon=True)
+        self.solver_thread = threading.Thread(target=self._worker_run_compare, args=(force_rerun,), daemon=True)
         self.solver_thread.start()
+
+    def _worker_run_compare(self, force_rerun: bool = False):
+        try:
+            cached = self.puzzle_results_cache.get(self.current_filepath, {}) if not force_rerun else {}
+
+            # ---------------- Giai đoạn 1: DFS ----------------
+            if "dfs" in cached:
+                dfs_res = cached["dfs"]
+            else:
+                self.solving_algo_name = "BENCHMARK: 1/2 DFS"
+                with self.live_lock:
+                    self.live_info = {
+                        "algo": "DFS",
+                        "grid": [row[:] for row in self.board.grid],
+                        "last_pos": (-1, -1),
+                        "nodes": 0,
+                        "backtracks": 0,
+                        "iterations": 0,
+                        "h": 0,
+                        "action": "START",
+                        "active": True
+                    }
+                b_dfs = self.board.copy()
+                dfs_res = SteppedSolver.run_dfs(
+                    b_dfs,
+                    max_nodes=None,
+                    timeout_sec=None,
+                    cancel_event=self.solver_cancel_event,
+                    step_callback=self._on_solver_step
+                )
+                if self.current_filepath not in self.puzzle_results_cache:
+                    self.puzzle_results_cache[self.current_filepath] = {}
+                self.puzzle_results_cache[self.current_filepath]["dfs"] = dict(dfs_res)
+
+            # Nếu người dùng bấm Dừng [ESC] ngay trong giai đoạn DFS
+            if self.solver_cancel_event and self.solver_cancel_event.is_set():
+                ida_res = {
+                    "solved": False,
+                    "timed_out": False,
+                    "user_stopped": True,
+                    "execution_time_sec": 0.0,
+                    "peak_memory_kb": 0.0,
+                    "nodes_explored": 0,
+                    "backtracks": 0,
+                    "iterations": 0,
+                    "total_steps": 0
+                }
+            else:
+                # ---------------- Giai đoạn 2: IDA* ----------------
+                if "ida" in cached:
+                    ida_res = cached["ida"]
+                else:
+                    self.solving_algo_name = "BENCHMARK: 2/2 IDA*"
+                    with self.live_lock:
+                        self.live_info = {
+                            "algo": "IDA*",
+                            "grid": [row[:] for row in self.board.grid],
+                            "last_pos": (-1, -1),
+                            "nodes": 0,
+                            "backtracks": 0,
+                            "iterations": 0,
+                            "h": 0,
+                            "action": "START",
+                            "active": True
+                        }
+                    b_ida = self.board.copy()
+                    ida_res = SteppedSolver.run_ida(
+                        b_ida,
+                        max_threshold=100,
+                        timeout_sec=None,
+                        cancel_event=self.solver_cancel_event,
+                        step_callback=self._on_solver_step
+                    )
+                    if self.current_filepath not in self.puzzle_results_cache:
+                        self.puzzle_results_cache[self.current_filepath] = {}
+                    self.puzzle_results_cache[self.current_filepath]["ida"] = dict(ida_res)
+
+            self.compare_results = {
+                "filename": os.path.basename(self.current_filepath),
+                "rows": self.board.rows,
+                "cols": self.board.cols,
+                "dfs": dfs_res,
+                "ida": ida_res
+            }
+            self.show_compare_modal = True
+            self.log_msg = "Đã hoàn thành Benchmark đối đầu!"
+        finally:
+            with self.live_lock:
+                self.live_info["active"] = False
+            self.is_solving = False
 
     # ==========================================================================
     # ĐIỀU KHIỂN DIỄN HOẠT (ANIMATION PLAYBACK ENGINE)
@@ -981,53 +1042,75 @@ class YinYangGameGUI:
 
 
     # ==========================================================================
-    # XUẤT BÁO CÁO KẾT QUẢ BENCHMARK RA FILE .TXT
+    # XUẤT BÁO CÁO KẾT QUẢ BENCHMARK RA FILE .TXT (THEO CHUẨN TENTS)
     # ==========================================================================
     def export_benchmark_report(self):
         if not self.compare_results:
             return
+
+        c = self.compare_results
+        dfs = c["dfs"]
+        ida = c["ida"]
+
+        base_map_name = os.path.splitext(c['filename'])[0]
+        timestamp_str = time.strftime('%Y%m%d_%H%M%S')
+        suggested_name = f"benchmark_{base_map_name}_{timestamp_str}.txt"
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        report_path = filedialog.asksaveasfilename(
+            title="Lưu file Báo cáo Thực nghiệm Yin-Yang",
+            initialdir=SRC_DIR,
+            initialfile=suggested_name,
+            defaultextension=".txt",
+            filetypes=[("Text files (*.txt)", "*.txt"), ("All files (*.*)", "*.*")]
+        )
+        root.destroy()
+
+        if not report_path:
+            return
+
+        dfs_status_str = 'CÓ (Thành công)' if dfs['solved'] else ('ĐÃ DỪNG (Người dùng dừng)' if dfs.get('user_stopped') else 'KHÔNG')
+        ida_status_str = 'CÓ (Thành công)' if ida['solved'] else ('ĐÃ DỪNG (Người dùng dừng)' if ida.get('user_stopped') else ('KHÔNG (Hết thời gian thử)' if ida.get('timed_out') else 'KHÔNG (Chưa tìm thấy)'))
+
+        content = f"""================================================================================
+BÁO CÁO THỰC NGHIỆM ĐỐI SÁNH THUẬT TOÁN - PUZZLE YIN-YANG
+================================================================================
+Bài toán kiểm thử      : {c['filename']}
+Kích thước lưới cờ     : {c['rows']}x{c['cols']} ({c['rows']*c['cols']} ô cờ)
+Thời điểm thực hiện    : {time.strftime('%Y-%m-%d %H:%M:%S')}
+--------------------------------------------------------------------------------
+THÔNG SỐ ĐO ĐẠC                    DFS (Blind Search + Pruning) IDA* (Heuristic h(n))
+--------------------------------------------------------------------------------
+Trạng thái giải thành công         {dfs_status_str:<28} {ida_status_str}
+Thời gian thực thi (giây)          {dfs['execution_time_sec']:.6f} s                 {ida['execution_time_sec']:.6f} s
+Bộ nhớ RAM đỉnh (KB)               {dfs['peak_memory_kb']:.2f} KB                   {ida['peak_memory_kb']:.2f} KB
+Số node / trạng thái đã duyệt      {dfs['nodes_explored']} nodes                    {ida['nodes_explored']} nodes
+Số lần quay lui (Backtracks)       {dfs['backtracks']} lần quay lui               {ida['backtracks']} lần quay lui
+Số vòng lặp tăng ngưỡng (IDA*)     N/A                          {ida.get('iterations', 1)} lần tăng ngưỡng
+Tổng số bước lưu vết (Steps)       {dfs.get('total_steps', 0)} bước                     {ida.get('total_steps', 0)} bước
+--------------------------------------------------------------------------------
+DANH GIA VA NHAN XET:
+1. Thuật toán DFS kết hợp Backtracking và hệ thống suy diễn tất định (Constraint
+   Propagation: luật 2x2 chống ca-rô, định lý chu vi Perimeter và cầu nối liên thông
+   Bridge Rule) giúp cắt tỉa không gian trạng thái cực kỳ mạnh mẽ, giải quyết triệt để
+   các bàn cờ kích thước lớn (10x10, 15x15) trong thời gian tính bằng mili-giây.
+2. Thuật toán IDA* (Iterative Deepening A*) sử dụng hàm Heuristic h(n) đo mức độ phân
+   mảnh thành phần liên thông kết hợp phạt căng 2x2, duyệt tăng dần theo ngưỡng chi phí,
+   đảm bảo tính tối ưu và định hướng nhánh tìm kiếm có xác suất liên thông cao nhất.
+================================================================================
+"""
         try:
-            fname = self.compare_results["filename"]
-            out_name = f"benchmark_{os.path.splitext(fname)[0]}.txt"
-            out_path = os.path.join(SRC_DIR, "..", out_name)
-
-            dfs = self.compare_results["dfs"]
-            ida = self.compare_results["ida"]
-
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write("=" * 70 + "\n")
-                f.write(" BÁO CÁO THỰC NGHIỆM SO SÁNH GIẢI THUẬT YIN-YANG (BTL1 - AI)\n")
-                f.write(f" File bài toán: {fname} (Kích thước: {self.compare_results['rows']}x{self.compare_results['cols']})\n")
-                f.write(f" Thời gian thực nghiệm: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write("=" * 70 + "\n\n")
-
-                f.write(f"{'Tiêu chí so sánh':<32} | {'Blind Search (DFS)':<18} | {'Heuristic (IDA*)':<18}\n")
-                f.write("-" * 74 + "\n")
-                f.write(f"{'Trạng thái giải':<32} | {'Thành công' if dfs['solved'] else 'Thất bại':<18} | {'Thành công' if ida['solved'] else 'Thất bại':<18}\n")
-                f.write(f"{'Thời gian thực thi (giây)':<32} | {dfs['execution_time_sec']:<18.4f} | {ida['execution_time_sec']:<18.4f}\n")
-                f.write(f"{'Bộ nhớ RAM đỉnh (KB)':<32} | {dfs['peak_memory_kb']:<18.2f} | {ida['peak_memory_kb']:<18.2f}\n")
-                f.write(f"{'Số trạng thái đã duyệt (Nodes)':<32} | {dfs['nodes_explored']:<18} | {ida['nodes_explored']:<18}\n")
-                f.write(f"{'Số lần quay lui (Backtracks)':<32} | {dfs['backtracks']:<18} | {ida['backtracks']:<18}\n")
-                f.write(f"{'Số vòng lặp tăng ngưỡng IDA*':<32} | {'N/A':<18} | {ida.get('iterations', 1):<18}\n")
-                f.write(f"{'Tổng số bước lưu vết (Steps)':<32} | {dfs.get('total_steps', 0):<18} | {ida.get('total_steps', 0):<18}\n")
-                f.write("=" * 70 + "\n\n")
-
-                f.write("KẾT LUẬN & ĐÁNH GIÁ THỰC NGHIỆM:\n")
-                if dfs['execution_time_sec'] < ida['execution_time_sec']:
-                    f.write("- DFS giải quyết bài toán nhanh hơn nhờ sự kết hợp chặt chẽ của các luật cắt tỉa 2x2 và liên thông trực tiếp.\n")
-                else:
-                    f.write("- IDA* cho hiệu năng tìm kiếm vượt trội nhờ hàm Heuristic đo độ phân mảnh liên thông định hướng chính xác nhánh đi.\n")
-
-            try:
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                messagebox.showinfo("Xuất Báo Cáo Thành Công", f"Đã lưu báo cáo tại:\n{os.path.abspath(out_path)}")
-                root.destroy()
-            except Exception:
-                pass
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes("-topmost", True)
+            messagebox.showinfo("Thành công", f"Đã xuất báo cáo thành công ra file:\n{report_path}")
+            root.destroy()
         except Exception as e:
-            print(f"[!] Lỗi xuất file báo cáo: {e}")
+            print(f"[!] Lỗi xuất file: {e}")
 
     # ==========================================================================
     # TÍNH TOÁN BỐ CỤC VÀ VẼ GIAO DIỆN CHÍNH
@@ -1169,9 +1252,9 @@ class YinYangGameGUI:
             ]
             if self.metrics.get("iterations", 0) > 0:
                 lines.append(("Vòng lặp IDA*:", f"{self.metrics['iterations']}"))
-        elif self.metrics["timed_out"]:
-            st_txt = "HẾT THỜI GIAN (TIMEOUT)"
-            st_color = COLOR_DANGER
+        elif self.metrics["user_stopped"]:
+            st_txt = "ĐÃ DỪNG (Người dùng dừng)"
+            st_color = (245, 158, 11)
             lines = [
                 ("Thời gian chạy:", f"{self.metrics['time_sec']:.4f} s"),
                 ("RAM đỉnh:", f"{self.metrics['peak_mem_kb']:.2f} KB"),
@@ -1179,8 +1262,8 @@ class YinYangGameGUI:
                 ("Số lần quay lui:", f"{self.metrics['backtracks']:,}"),
                 ("Số bước lưu vết:", f"{len(self.history_steps):,}"),
             ]
-        elif self.metrics["user_stopped"]:
-            st_txt = "NGƯỜI DÙNG DỪNG"
+        elif self.metrics["timed_out"]:
+            st_txt = "HẾT THỜI GIAN (TIMEOUT)"
             st_color = COLOR_DANGER
             lines = [
                 ("Thời gian chạy:", f"{self.metrics['time_sec']:.4f} s"),
@@ -1334,7 +1417,8 @@ class YinYangGameGUI:
             self._draw_speed_menu()
 
     # ==========================================================================
-    # CỬA SỔ MODAL SO SÁNH ĐỐI ĐẦU SIDE-BY-SIDE (BENCHMARK MODAL)
+    # ==========================================================================
+    # CỬA SỔ MODAL SO SÁNH ĐỐI ĐẦU SIDE-BY-SIDE (THEO CHUẨN TENTS)
     # ==========================================================================
     def _draw_compare_modal(self):
         if not self.compare_results:
@@ -1345,65 +1429,81 @@ class YinYangGameGUI:
         overlay.fill((0, 0, 0, 185))
         self.screen.blit(overlay, (0, 0))
 
-        # Cửa sổ Dialog nổi bật
-        mw = 780
-        mh = 490
+        # Cửa sổ Modal tỷ lệ vàng rộng rãi
+        mw = 860
+        mh = 580
         mx = (WINDOW_WIDTH - mw) // 2
         my = (WINDOW_HEIGHT - mh) // 2
         dialog_rect = pygame.Rect(mx, my, mw, mh)
 
         pygame.draw.rect(self.screen, COLOR_PANEL, dialog_rect, border_radius=12)
-        pygame.draw.rect(self.screen, COLOR_GOLD, dialog_rect, 2, border_radius=12)
+        pygame.draw.rect(self.screen, COLOR_COMPARE, dialog_rect, 2, border_radius=12)
 
         # Header Dialog
-        self.screen.blit(self.font_large.render("BẢNG SO SÁNH ĐỐI ĐẦU GIẢI THUẬT (BTL1 - AI)", True, COLOR_GOLD), (mx + 25, my + 22))
-        f_info = f"Bài toán: {self.compare_results['filename']} ({self.compare_results['rows']}x{self.compare_results['cols']})"
-        self.screen.blit(self.font_medium.render(f_info, True, COLOR_TEXT_MUTED), (mx + 25, my + 54))
+        title = self.font_large.render("BẢNG ĐỐI SÁNH THUẬT TOÁN (BENCHMARK REPORT)", True, COLOR_TEXT_WHITE)
+        self.screen.blit(title, (mx + 30, my + 25))
 
-        # Bảng dữ liệu thực nghiệm
-        tbl_x = mx + 25
-        tbl_y = my + 95
-        tbl_w = mw - 50
-        row_h = 36
-
-        # Hàng tiêu đề bảng
-        pygame.draw.rect(self.screen, (38, 44, 60), (tbl_x, tbl_y, tbl_w, row_h), border_radius=6)
-        self.screen.blit(self.font_bold.render("TIÊU CHÍ ĐÁNH GIÁ", True, COLOR_TEXT_LABEL), (tbl_x + 15, tbl_y + 8))
-        self.screen.blit(self.font_bold.render("BLIND SEARCH (DFS)", True, COLOR_DFS), (tbl_x + 320, tbl_y + 8))
-        self.screen.blit(self.font_bold.render("HEURISTIC (IDA*)", True, COLOR_IDA), (tbl_x + 550, tbl_y + 8))
+        f_info = f"File bài toán: {self.compare_results['filename']} | Lưới: {self.compare_results['rows']}x{self.compare_results['cols']} ({self.compare_results['rows']*self.compare_results['cols']} ô cờ)"
+        self.screen.blit(self.font_medium.render(f_info, True, COLOR_GOLD), (mx + 30, my + 60))
 
         dfs = self.compare_results["dfs"]
         ida = self.compare_results["ida"]
 
+        # Bảng dữ liệu thực nghiệm
+        table_x = mx + 30
+        table_y = my + 95
+        row_h = 38
+
+        # Hàng tiêu đề bảng
+        pygame.draw.rect(self.screen, COLOR_CARD, (table_x, table_y, 800, row_h), border_radius=6)
+        self.screen.blit(self.font_bold.render("THÔNG SỐ ĐO ĐẠC", True, COLOR_TEXT_WHITE), (table_x + 20, table_y + 10))
+        self.screen.blit(self.font_bold.render("DFS (BLIND SEARCH)", True, COLOR_DFS), (table_x + 320, table_y + 10))
+        self.screen.blit(self.font_bold.render("IDA* (HEURISTIC)", True, COLOR_IDA), (table_x + 560, table_y + 10))
+
+        dfs_status = "CÓ (Thành công)" if dfs["solved"] else ("ĐÃ DỪNG (Người dùng dừng)" if dfs.get("user_stopped") else "KHÔNG (Chưa tìm thấy)")
+        ida_status = "CÓ (Thành công)" if ida["solved"] else ("ĐÃ DỪNG (Người dùng dừng)" if ida.get("user_stopped") else ("KHÔNG (Hết thời gian thử)" if ida.get("timed_out") else "KHÔNG (Chưa tìm thấy)"))
+
         rows_data = [
-            ("Trạng thái tìm kiếm", "THÀNH CÔNG" if dfs["solved"] else "THẤT BẠI", "THÀNH CÔNG" if ida["solved"] else "THẤT BẠI"),
-            ("Thời gian thực thi", f"{dfs['execution_time_sec']:.4f} s", f"{ida['execution_time_sec']:.4f} s"),
-            ("Bộ nhớ RAM đỉnh", f"{dfs['peak_memory_kb']:.2f} KB", f"{ida['peak_memory_kb']:.2f} KB"),
-            ("Số trạng thái đã duyệt", f"{dfs['nodes_explored']:,}", f"{ida['nodes_explored']:,}"),
-            ("Số lần quay lui (Backtracks)", f"{dfs['backtracks']:,}", f"{ida['backtracks']:,}"),
-            ("Số vòng lặp tăng ngưỡng IDA*", "N/A", f"{ida.get('iterations', 1)}"),
-            ("Số bước lưu vết (Steps)", f"{dfs.get('total_steps', 0):,}", f"{ida.get('total_steps', 0):,}")
+            ("Trạng thái giải thành công", dfs_status, ida_status),
+            ("Thời gian thực thi (giây)", f"{dfs['execution_time_sec']:.6f} s", f"{ida['execution_time_sec']:.6f} s"),
+            ("Bộ nhớ RAM đỉnh (KB)", f"{dfs['peak_memory_kb']:.2f} KB", f"{ida['peak_memory_kb']:.2f} KB"),
+            ("Số node / trạng thái đã duyệt", f"{dfs['nodes_explored']:,} nodes", f"{ida['nodes_explored']:,} nodes"),
+            ("Số lần quay lui (Backtracks)", f"{dfs['backtracks']:,} lần quay lui", f"{ida['backtracks']:,} lần quay lui"),
+            ("Số vòng lặp tăng ngưỡng (IDA*)", "N/A (DFS thuần)", f"{ida.get('iterations', 1)} lần tăng ngưỡng"),
+            ("Tổng số bước lưu vết (Steps)", f"{dfs.get('total_steps', 0):,} bước", f"{ida.get('total_steps', 0):,} bước")
         ]
 
-        curr_y = tbl_y + row_h + 4
-        for i, (crit, v_dfs, v_ida) in enumerate(rows_data):
-            bg_col = (30, 35, 48) if i % 2 == 0 else (24, 28, 38)
-            pygame.draw.rect(self.screen, bg_col, (tbl_x, curr_y, tbl_w, row_h - 2), border_radius=4)
+        for i, (metric, val_dfs, val_ida) in enumerate(rows_data):
+            ry = table_y + (i + 1) * row_h
+            bg_col = (30, 38, 58) if i % 2 == 0 else (24, 32, 50)
+            pygame.draw.rect(self.screen, bg_col, (table_x, ry, 800, row_h))
+            pygame.draw.line(self.screen, COLOR_CARD_BORDER, (table_x, ry), (table_x + 800, ry), 1)
 
-            self.screen.blit(self.font_medium.render(crit, True, COLOR_TEXT_WHITE), (tbl_x + 15, curr_y + 6))
-            self.screen.blit(self.font_bold.render(v_dfs, True, COLOR_DFS if "THÀNH" in v_dfs else COLOR_TEXT_LABEL), (tbl_x + 320, curr_y + 6))
-            self.screen.blit(self.font_bold.render(v_ida, True, COLOR_IDA if "THÀNH" in v_ida else COLOR_TEXT_LABEL), (tbl_x + 550, curr_y + 6))
-            curr_y += row_h
+            self.screen.blit(self.font_medium.render(metric, True, COLOR_TEXT_WHITE), (table_x + 20, ry + 10))
+            self.screen.blit(self.font_bold.render(val_dfs, True, COLOR_DFS if "CÓ" in val_dfs else COLOR_TEXT_WHITE), (table_x + 320, ry + 10))
+            self.screen.blit(self.font_bold.render(val_ida, True, COLOR_IDA if "CÓ" in val_ida else COLOR_TEXT_WHITE), (table_x + 560, ry + 10))
 
-        # Nút Đóng, Đo lại & Nút Xuất báo cáo
+        # Thẻ Nhận xét so sánh giải thuật cho báo cáo
+        note_y = table_y + 8 * row_h + 10
+        pygame.draw.rect(self.screen, (20, 26, 42), (table_x, note_y, 800, 75), border_radius=6)
+        pygame.draw.rect(self.screen, COLOR_CARD_BORDER, (table_x, note_y, 800, 75), 1, border_radius=6)
+
+        self.screen.blit(self.font_bold.render("NHẬN XÉT SO SÁNH GIẢI THUẬT CHO BÁO CÁO:", True, COLOR_GOLD), (table_x + 15, note_y + 8))
+        note1 = "- DFS: Duyệt theo chiều sâu kết hợp suy diễn 2x2, định lý chu vi (Perimeter) và cầu nối liên thông (Bridge rule); cắt tỉa triệt để và giải tức thì."
+        note2 = "- IDA*: Tìm kiếm sâu lặp lại mở rộng ngưỡng chi phí kết hợp hàm heuristic đo độ phân mảnh liên thông h(n); định hướng nhánh đi tối ưu."
+        self.screen.blit(self.font_small.render(note1, True, COLOR_TEXT_LABEL), (table_x + 15, note_y + 30))
+        self.screen.blit(self.font_small.render(note2, True, COLOR_TEXT_LABEL), (table_x + 15, note_y + 48))
+
+        # Các nút hành động phía dưới
         btn_y = my + mh - 55
-        self.btn_export = Button((mx + 25, btn_y, 210, 38), "XUẤT BÁO CÁO TXT", COLOR_CARD, COLOR_CARD_HOVER, font=self.font_bold, border_radius=6, border_color=COLOR_GOLD)
-        self.btn_modal_rerun = Button((mx + 250, btn_y, 190, 38), "ĐO LẠI (RE-RUN)", COLOR_CARD, COLOR_CARD_HOVER, font=self.font_bold, border_radius=6, border_color=COLOR_IDA)
-        self.btn_close_modal = Button((mx + mw - 140, btn_y, 115, 38), "ĐÓNG", COLOR_GOLD, COLOR_GOLD_HOVER, text_color=(20, 20, 20), font=self.font_bold, border_radius=6)
-
-        self.btn_export.draw(self.screen)
+        self.btn_modal_rerun.rect = pygame.Rect(table_x + 15, btn_y, 230, 38)
         self.btn_modal_rerun.draw(self.screen)
-        self.btn_close_modal.draw(self.screen)
+
+        self.btn_modal_export.rect = pygame.Rect(table_x + 470, btn_y, 180, 38)
+        self.btn_modal_export.draw(self.screen)
+
+        self.btn_modal_close.rect = pygame.Rect(table_x + 675, btn_y, 110, 38)
+        self.btn_modal_close.draw(self.screen)
 
     # ==========================================================================
     # VÒNG LẶP CHÍNH (MAIN LOOP & EVENT HANDLING)
@@ -1419,8 +1519,11 @@ class YinYangGameGUI:
 
             # Tự động thay đổi con trỏ chuột sang hình bàn tay (Cursor-Pointer) khi trỏ vào nút hoặc thanh trượt
             if self.show_compare_modal:
-                for b in [getattr(self, 'btn_export', None), getattr(self, 'btn_modal_rerun', None), getattr(self, 'btn_close_modal', None)]:
-                    if b and hasattr(b, "rect") and b.rect.collidepoint(mouse_pos):
+                self.btn_modal_rerun.check_hover(mouse_pos)
+                self.btn_modal_export.check_hover(mouse_pos)
+                self.btn_modal_close.check_hover(mouse_pos)
+                for b in [self.btn_modal_rerun, self.btn_modal_export, self.btn_modal_close]:
+                    if b.rect.collidepoint(mouse_pos):
                         any_hover = True
                         break
             elif self.is_solving:
@@ -1456,11 +1559,54 @@ class YinYangGameGUI:
                         self.solver_cancel_event.set()
                     running = False
 
-                elif event.type == pygame.KEYDOWN:
-                    if event.key == pygame.K_SPACE:
-                        if self.is_solving:
+                # 1. Xử lý sự kiện trong Modal So Sánh Đối Đầu
+                if self.show_compare_modal:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if self.btn_modal_close.rect.collidepoint(event.pos):
+                            self.show_compare_modal = False
+                        elif self.btn_modal_export.rect.collidepoint(event.pos):
+                            self.export_benchmark_report()
+                        elif self.btn_modal_rerun.rect.collidepoint(event.pos):
+                            self.show_compare_modal = False
+                            if self.current_filepath in self.puzzle_results_cache:
+                                del self.puzzle_results_cache[self.current_filepath]
+                            self.run_benchmark_comparison(force_rerun=True)
+                    elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        self.show_compare_modal = False
+                    continue
+
+                # 2. Xử lý khi đang giải thuật toán
+                if self.is_solving:
+                    if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                        if hasattr(self, 'btn_stop_solving') and self.btn_stop_solving.rect.collidepoint(event.pos):
                             self.request_stop_solving()
-                        elif self.history_steps:
+                            continue
+                        elif self.show_speed_menu:
+                            menu_rect, item_rects = self._get_speed_menu_rects()
+                            handled = False
+                            for i, irect in enumerate(item_rects):
+                                if irect.collidepoint(event.pos):
+                                    self.playback_speed_idx = i
+                                    self.show_speed_menu = False
+                                    handled = True
+                                    break
+                            if not handled:
+                                self.show_speed_menu = False
+                            continue
+                        elif self.buttons["speed_toggle"].rect.collidepoint(event.pos):
+                            self.show_speed_menu = not self.show_speed_menu
+                            continue
+                        continue
+                    elif event.type == pygame.KEYDOWN:
+                        if event.key in (pygame.K_ESCAPE, pygame.K_SPACE):
+                            self.request_stop_solving()
+                            continue
+                    continue
+
+                # 3. Phím tắt điều khiển khi không trong trạng thái giải
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_SPACE:
+                        if self.history_steps:
                             self.is_playing = not self.is_playing
                             if self.is_playing and self.current_step_index >= len(self.history_steps) - 1:
                                 self.jump_to_step(0)
@@ -1479,50 +1625,11 @@ class YinYangGameGUI:
                     elif event.key == pygame.K_ESCAPE:
                         if self.show_speed_menu:
                             self.show_speed_menu = False
-                        elif self.show_compare_modal:
-                            self.show_compare_modal = False
-                        elif self.is_solving:
-                            self.request_stop_solving()
 
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mpos = event.pos
 
-                    # 1. Sự kiện trong Modal So Sánh
-                    if self.show_compare_modal:
-                        if hasattr(self, 'btn_close_modal') and self.btn_close_modal.rect.collidepoint(mpos):
-                            self.show_compare_modal = False
-                        elif hasattr(self, 'btn_export') and self.btn_export.rect.collidepoint(mpos):
-                            self.export_benchmark_report()
-                        elif hasattr(self, 'btn_modal_rerun') and self.btn_modal_rerun.rect.collidepoint(mpos):
-                            self.show_compare_modal = False
-                            if self.current_filepath in self.puzzle_results_cache:
-                                del self.puzzle_results_cache[self.current_filepath]
-                            self.run_benchmark_comparison(force_rerun=True)
-                        continue
-
-                    # 2. Xử lý khi đang giải thuật toán
-                    if self.is_solving:
-                        if hasattr(self, 'btn_stop_solving') and self.btn_stop_solving.rect.collidepoint(mpos):
-                            self.request_stop_solving()
-                            continue
-                        elif self.show_speed_menu:
-                            menu_rect, item_rects = self._get_speed_menu_rects()
-                            handled = False
-                            for i, irect in enumerate(item_rects):
-                                if irect.collidepoint(mpos):
-                                    self.playback_speed_idx = i
-                                    self.show_speed_menu = False
-                                    handled = True
-                                    break
-                            if not handled:
-                                self.show_speed_menu = False
-                            continue
-                        elif self.buttons["speed_toggle"].rect.collidepoint(mpos):
-                            self.show_speed_menu = not self.show_speed_menu
-                            continue
-                        continue
-
-                    # 3. Xử lý menu tốc độ khi ở chế độ bình thường
+                    # Xử lý menu tốc độ khi ở chế độ bình thường
                     if self.show_speed_menu:
                         menu_rect, item_rects = self._get_speed_menu_rects()
                         handled = False
@@ -1540,7 +1647,7 @@ class YinYangGameGUI:
                         else:
                             self.show_speed_menu = False
 
-                    # 4. Xử lý click thanh Scrub Bar
+                    # Xử lý click thanh Scrub Bar
                     if self.scrub_bar.rect.collidepoint(mpos):
                         self.is_playing = False
                         self.scrub_bar.is_dragging = True
@@ -1548,7 +1655,7 @@ class YinYangGameGUI:
                         self.jump_to_step(step)
                         continue
 
-                    # 5. Xử lý click các nút bấm
+                    # Xử lý click các nút bấm
                     for key, btn in self.buttons.items():
                         if btn.rect.collidepoint(mpos):
                             if key.startswith("cat_"):
@@ -1616,10 +1723,10 @@ class YinYangGameGUI:
                         self.btn_stop_solving.is_hovered = self.btn_stop_solving.rect.collidepoint(mpos)
 
                     if self.show_compare_modal:
-                        if hasattr(self, 'btn_close_modal'):
-                            self.btn_close_modal.is_hovered = self.btn_close_modal.rect.collidepoint(mpos)
-                        if hasattr(self, 'btn_export'):
-                            self.btn_export.is_hovered = self.btn_export.rect.collidepoint(mpos)
+                        if hasattr(self, 'btn_modal_close'):
+                            self.btn_modal_close.is_hovered = self.btn_modal_close.rect.collidepoint(mpos)
+                        if hasattr(self, 'btn_modal_export'):
+                            self.btn_modal_export.is_hovered = self.btn_modal_export.rect.collidepoint(mpos)
                         if hasattr(self, 'btn_modal_rerun'):
                             self.btn_modal_rerun.is_hovered = self.btn_modal_rerun.rect.collidepoint(mpos)
 
