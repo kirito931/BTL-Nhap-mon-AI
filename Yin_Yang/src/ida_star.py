@@ -455,7 +455,53 @@ class IDAStarSolver:
                             return best
         return best
 
-    def solve(self, max_threshold: int = 50):
+    def _shave_pass(self):
+        changed = False
+        candidates = []
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.grid[r][c] == '.':
+                    has_nb = any(0 <= r + dr < self.rows and 0 <= c + dc < self.cols and self.grid[r + dr][c + dc] != '.'
+                                 for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+                    if has_nb:
+                        candidates.append((r, c))
+
+        for r, c in candidates:
+            if self.grid[r][c] != '.':
+                continue
+            if self.user_stopped or (self.cancel_event is not None and self.cancel_event.is_set()):
+                return False
+
+            snap = self._snap()
+            can_b = self._set(r, c, 'B')
+            self._backtrack(snap)
+
+            snap = self._snap()
+            can_w = self._set(r, c, 'W')
+            self._backtrack(snap)
+
+            if can_b and not can_w:
+                if not self._set(r, c, 'B', 'deduce'):
+                    return False
+                changed = True
+            elif can_w and not can_b:
+                if not self._set(r, c, 'W', 'deduce'):
+                    return False
+                changed = True
+            elif not can_b and not can_w:
+                return None  # Conflict
+        return changed
+
+    def _cascade_all(self):
+        while True:
+            res = self._shave_pass()
+            if res is None:
+                return False
+            if not res:
+                break
+        return True
+
+    def solve(self, max_threshold: float = float("inf")):
         tracemalloc.start()
         self.start_time = time.perf_counter()
 
@@ -520,6 +566,11 @@ class IDAStarSolver:
         if self.timeout_sec is not None and (time.perf_counter() - self.start_time) > self.timeout_sec:
             self.timed_out = True
             return False, float("inf")
+
+        if not self._cascade_all():
+            return False, float("inf")
+        if self._uc == 0:
+            return self.board.is_solved(), threshold
 
         h = self.heuristic()
         if h > threshold:

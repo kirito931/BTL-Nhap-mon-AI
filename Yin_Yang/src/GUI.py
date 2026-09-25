@@ -120,7 +120,7 @@ class SteppedSolver:
         return result
 
     @staticmethod
-    def run_ida(board: YinYangBoard, max_threshold=100, timeout_sec=None, cancel_event=None, step_callback=None):
+    def run_ida(board: YinYangBoard, max_threshold=float("inf"), timeout_sec=None, cancel_event=None, step_callback=None):
         solver = IDAStarSolver(board, max_nodes=None, timeout_sec=timeout_sec, cancel_event=cancel_event, step_callback=step_callback)
         result = solver.solve(max_threshold=max_threshold)
         return result
@@ -819,7 +819,7 @@ class YinYangGameGUI:
                 else:
                     res = SteppedSolver.run_ida(
                         solve_board,
-                        max_threshold=100,
+                        max_threshold=float("inf"),
                         timeout_sec=None,
                         cancel_event=self.solver_cancel_event,
                         step_callback=self._on_solver_step
@@ -956,7 +956,7 @@ class YinYangGameGUI:
                     b_ida = self.board.copy()
                     ida_res = SteppedSolver.run_ida(
                         b_ida,
-                        max_threshold=100,
+                        max_threshold=float("inf"),
                         timeout_sec=None,
                         cancel_event=self.solver_cancel_event,
                         step_callback=self._on_solver_step
